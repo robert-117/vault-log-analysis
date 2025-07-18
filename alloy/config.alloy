@@ -1,0 +1,173 @@
+// Discover all running Docker containers via the Docker socket
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+/* ------------- PROMETHEUS METRICS ------------- */
+
+// Forward metrics to Loki (can be swapped with Prometheus remote write endpoint if needed)
+prometheus.remote_write "prom" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}
+
+// Scrape metrics from all discovered containers (Vault will be among them)
+prometheus.scrape "vault_metrics" {
+  targets    = discovery.docker.containers.targets
+  forward_to = [prometheus.remote_write.prom.receiver]
+}
+
+/* ------------- LIVE AUDIT LOGS ------------- */
+
+// Read Vault audit logs from the container
+local.file_match "live_audit_logs_source" {
+  path_targets = [{"__path__" = "/vault/logs/aud*.log"}]
+  sync_period = "10s"
+}
+
+// Source files and send to processor
+loki.source.file "live_static_" {
+  targets    = local.file_match.live_audit_logs_source.targets
+  forward_to = [loki.process.live_audit_pipeline.receiver]
+}
+
+loki.process "live_audit_pipeline" {
+  forward_to = [loki.write.loki_write.receiver]
+
+  stage.json {
+    expressions = {
+      log_type        = "type",
+      log_time        = "time",
+      operation       = "request.operation",
+      path            = "request.path",
+      namespace       = "request.namespace.id",
+      remote_address  = "request.remote_address",
+      client_token    = "auth.client_token",
+      mount_point     = "request.mount_point",
+    }
+  }
+
+  stage.labels {
+    values = {
+      type        = "log_type",
+      path        = "path",
+      operation   = "operation",
+      ns          = "namespace",
+      addr        = "remote_address",
+      mount_point = "mount_point", 
+    }
+  }
+
+  stage.output {
+    source = "log_type"
+  }
+}
+
+/* ------------- STATIC AUDIT LOGS ------------- */
+
+// Read Vault audit logs from the container
+local.file_match "static_audit_logs_source" {
+  path_targets = [{"__path__" = "/var/log/custom/audit_logs/*.log"}]
+  sync_period = "10s"
+}
+
+// Source files and send to processor
+loki.source.file "static_audit_transfer" {
+  targets    = local.file_match.static_audit_logs_source.targets
+  forward_to = [loki.process.static_audit_pipeline.receiver]
+}
+
+loki.process "static_audit_pipeline" {
+  forward_to = [loki.write.loki_write.receiver]
+
+  stage.multiline {
+    firstline = "^{"
+  }
+
+  stage.json {
+    expressions = {
+      log_type        = "type",
+      time            = "time",
+      operation       = "request.operation",
+      path            = "request.path",
+      namespace       = "request.namespace.id",
+      remote_address  = "request.remote_address",
+      client_token    = "auth.client_token",
+      mount_point     = "request.mount_point",
+    }
+  }
+
+  stage.timestamp {
+    source = "time"
+    format = "rfc3339nano"
+  }
+
+  stage.labels {
+    values = {
+      type        = "log_type",
+      path        = "path",
+      operation   = "operation",
+      ns          = "namespace",
+      addr        = "remote_address",
+      mount_point = "mount_point", 
+    }
+  }
+
+
+  stage.output {
+    source = "type"
+  }
+}
+
+
+/* ------------- STATIC OPS LOGS ------------- */
+
+// Read static logs dropped in /var/log/custom
+local.file_match "static_logs" {
+  path_targets = [{"__path__" = "/var/log/custom/ops_logs/*.log"}]
+  sync_period = "5s"
+}
+
+// Source files and send to processor
+loki.source.file "static_transfer" {
+  targets    = local.file_match.static_logs.targets
+  forward_to = [loki.process.static_pipeline.receiver]
+}
+
+loki.process "static_pipeline" {
+  forward_to = [loki.write.loki_write.receiver]
+
+    // Attempt to extract basic syslog fields
+  stage.regex {
+    expression = "^(?P<syslog_timestamp>\\w+\\s+\\d+\\s+\\d+:\\d+:\\d+)\\s+(?P<host>\\S+)\\s+vault\\[\\d+\\]:\\s+(?P<log_time>\\S+)\\s+\\[(?P<level>\\w+)\\]\\s+(?P<message>.+)$"
+  }
+
+  stage.timestamp {
+    source   = "log_time"
+    format   = "2006-01-02T15:04:05.000-0700"  // matches Vault's timestamps like: 2025-05-20T06:25:05.297-0700
+    location = "Local"
+  }
+
+  stage.labels {
+    values = {
+      level   = "level",
+      host    = "host",
+    }
+  }
+
+  stage.output {
+    source = "message"
+  }
+}
+
+/* ------------- WRITE ALL LOGS TO GRAFANA ------------- */
+
+// Push logs to Loki
+loki.write "loki_write" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+//    batch_size = "10MiB"
+//    batch_wait = "3s"
+  }
+}

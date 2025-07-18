@@ -1,0 +1,109 @@
+version: '3.8'
+
+volumes:
+  shared-data:
+
+services:
+  vault:
+    image: hashicorp/vault:1.20
+    container_name: vault
+    ports:
+      - "8200:8200"
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: root
+      VAULT_ADDR: http://127.0.0.1:8200
+      #VAULT_LICENSE: ${VAULT_LICENSE:-} # Add if using vault enterprise image
+    volumes:
+      - ./vault/config:/vault/config
+      - ./vault/logs:/vault/logs
+      - ./vault/bootstrap.sh:/bootstrap.sh
+      - ./shared-data:/shared
+    entrypoint: >
+      sh -c "
+        echo Installing dependencies... &&
+        wget -qO /usr/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.6/jq-linux64 &&
+        chmod +x /usr/bin/jq &&
+        vault server -config=/vault/config/vault.hcl & 
+        sleep 5 && 
+        /bootstrap.sh && 
+        sleep 3 &&
+        vault audit enable file file_path=/vault/logs/audit.log log_raw=true &&
+        wait"
+    networks:
+      - vaultstack
+
+  loki:
+    image: grafana/loki:2.9.3
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: 
+      - "-config.file=/etc/loki/config.yml"
+    volumes:
+      - ./loki/config.yml:/etc/loki/config.yml
+      - ./loki/static-logs/audit_logs:/var/log/custom/audit_logs
+      - ./loki/static-logs/ops_logs:/var/log/custom/ops_logs
+      - ./loki/wal:/wal
+      - ./loki/index:/loki/index
+      - ./loki/cache:/loki/cache
+      - ./loki/chunks:/loki/chunks
+      - ./loki/compactor:/loki/compactor
+    networks:
+      - vaultstack
+
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+      - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_USERS_ALLOW_ORG_CREATE=false
+      - GF_USERS_AUTO_ASSIGN_ORG=true
+      - GF_USERS_AUTO_ASSIGN_ORG_ROLE=Admin
+    depends_on:
+      - loki
+      - alloy
+    networks:
+      - vaultstack
+
+  alloy:
+    image: grafana/alloy:latest
+    container_name: alloy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./alloy/config.alloy:/etc/alloy/config.alloy
+      - ./vault/logs:/vault/logs # live log location
+      - ./loki/static-logs/audit_logs:/var/log/custom/audit_logs
+      - ./loki/static-logs/ops_logs:/var/log/custom/ops_logs
+    entrypoint: /bin/alloy run /etc/alloy/config.alloy
+    networks:
+      - vaultstack
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-remote-write-receiver"
+      - "--storage.tsdb.retention.time=1y"
+    volumes:
+      - ./shared-data:/shared:ro
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - vaultstack
+
+networks:
+  vaultstack:
+    driver: bridge

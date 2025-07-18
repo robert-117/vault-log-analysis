@@ -1,0 +1,16 @@
+# Ignore Vault token file in shared-data
+shared-data/prometheus-token.txt
+
+# Ignored backups of configs
+alloy/config.alloy.*
+loki/config.yml.*
+
+# Ignored testing files
+loki/static-logs/audit_logs/test_audit.log
+loki/static-logs/ops_logs/test_ops.log
+
+# Ignore credential generation from bootstrap
+vault/logs/audit.log
+vault/logs/init.json
+vault/logs/root.token
+vault/logs/unseal.key
