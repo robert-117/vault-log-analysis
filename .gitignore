@@ -1,5 +1,6 @@
 # Ignore Vault token file in shared-data
 shared-data/prometheus-token.txt
+.env
 
 # Ignored backups of configs
 alloy/config.alloy.*
